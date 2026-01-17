@@ -1,134 +1,263 @@
-# Very.META1 — README
+# Very.META1 — coupon generator
 
-Questo repository contiene uno script Python (coupon_gen.py) pensato per emulare il flusso di generazione coupon della promozione "promo-meta1" di VeryMobile in modalità minimale (HTTP requests), con opzioni per esecuzione concorrente, generazione deterministica di email e salvataggio dei risultati.
+Script Python per automatizzare in modo **controllato** la raccolta di coupon della promo `promo-meta1` di Very Mobile, replicando il flusso del frontend (POST verso il webhook n8n) con:
 
-IMPORTANTE: eseguire lo script solo se si possiede esplicita autorizzazione del proprietario del sito. L'autore dello script non è responsabile per usi non autorizzati.
+- esecuzione **concorrente** (multi‑thread)  
+- generazione di **email deterministiche** seed/index  
+- salvataggio risultati in **CSV** (`EMAIL,COUPON`)  
+- **UI da terminale** compatta in stile “scanner” (lista codici + barra di progresso).
+
+> ⚠️ **Uso consentito solo se sei autorizzato** dal proprietario del servizio (Very Mobile / WindTre o tuo committente).  
+> L’autore non è responsabile di utilizzi impropri o non conformi a termini e leggi applicabili.
 
 ---
 
-## Obiettivo
-- Riprodurre il comportamento principale del frontend:
-  - invio POST al backend (webhook) con payload che include email e operator;
-  - lettura della risposta JSON (Coupon / Page / MNP) o ricerca del codice nella pagina di ringraziamento;
-  - costruzione e registrazione della coppia EMAIL ↔ COUPON.
-- Consentire generazione massiva rapida (concorrenza), preservare un seed persistente per non riusare indirizzi, salvare i risultati in CSV con intestazione `EMAIL,COUPON`.
+## Funzionalità principali
+
+- Invio richieste al webhook n8n ufficiale (`STANDARD_WEBHOOK_URL` nel codice) con payload:
+
+  ```json
+  { "email": "<email>", "operator": "<MVNO>" }
+  ```
+
+- Parsing della risposta JSON (chiavi `Coupon`, `Page`, `MNP` o equivalenti) o, in fallback, dal body testuale/pagina di ringraziamento.
+- Generazione **massiva** di coupon con:
+  - **thread multipli** (`--concurrency`)
+  - limite globale di tentativi (`--max-attempts`)
+  - deduplica codice: ogni coupon viene contato una sola volta per esecuzione.
+- **Seed/email deterministici**:
+  - seed hex persistito in `email_seed.txt`
+  - indice persistente in `email_index.txt`
+  - email generate come:  
+    `SEEDSHORT-000123@domain` (es. `9aa690cc-000295@example.com`)
+- File di lavoro:
+  - `results.csv` — output finale (colonne `EMAIL,COUPON`)
+  - `email_seed.txt` — seed corrente
+  - `email_index.txt` — indice successivo
+  - `used_emails.txt` — log append‑only delle email usate
+  - `seeds_history.txt` — cronologia seed con timestamp
+  - `run.log` — log dettagliato (se abilitato)
 
 ---
 
 ## Requisiti
-- Python 3.8+
-- Dipendenze: requests (installare con `pip install requests`)
+
+- Python **3.8+**
+- Dipendenza Python:
+  ```bash
+  pip install requests
+  ```
 
 ---
 
-## File principali
-- `coupon_gen.py` — script principale (diverse versioni: sequenziale o concorrente a seconda della CLI).
-- `results.csv` — output CSV (HEADER: `EMAIL,COUPON`).
-- `email_seed.txt` — seed hex usato per generare email deterministiche (generato automaticamente ogni esecuzione, salvo `--reuse-seed`).
-- `email_index.txt` — indice persistente delle email (incrementato per evitare duplicati).
-- `used_emails.txt` — append-only, elenco email realmente usate (per ispezione).
-- `seeds_history.txt` — cronologia dei seed generati con timestamp.
-- `run.log` — log dell'esecuzione (se richiesto tramite `--log`).
+## UI da terminale
+
+Lo script ora espone una UI compatta ispirata a `hunter.py`:
+
+- Header iniziale con icone:
+  - target coupon, modalità email, operatore, numero di worker
+- Una riga per ciascun coupon trovato:
+  ```text
+  🟢 [001] S-KC91IZ   9aa690cc-000295@example.com
+  🟢 [002] S-RGWWFD   9aa690cc-000299@example.com
+  ...
+  ```
+- **Unica barra di progresso** in fondo, aggiornata in‑place:
+  ```text
+  🚀 60.00% |██████████░░░░░░░░░░░░░░| 3/5  attempts:18  speed:0.21/s  ETA:00:00:11
+  ```
+
+Tutto il rumore (payload, snippet di risposta, errori dettagliati) finisce in `run.log` se specificato con `--log`.
 
 ---
 
-## Caratteristiche principali / Flag CLI
-Esempio generico:
-```
-python3 coupon_gen.py --real --yes --count 100 --no-email --concurrency 8 --max-attempts 2000 --output results.csv --log run.log
-```
+## Utilizzo base
 
-Principali opzioni (riassunto):
-- `--real` : esegue richieste reali (default = dry-run).
-- `--yes` : bypassa la conferma interattiva (usare con cautela).
-- `--count N` : numero di coupon unici da raccogliere.
-- `--operator OP` : operatore da inviare (es. `CoopVoce`, `1Mobile`, ecc.).
-- `--email EMAIL` : email da usare se NON si utilizza `--no-email`.
-- `--no-email` : usa email generate deterministiche (seed + index) per ogni richiesta.
-- `--seed-file FILE` : percorso file seed (default `email_seed.txt`).
-- `--index-file FILE` : file indice persistente (default `email_index.txt`).
-- `--used-file FILE` : file append-only con email usate (default `used_emails.txt`).
-- `--reuse-seed` : riutilizza seed esistente al posto di generarne uno nuovo (non raccomandato).
-- `--max-retries` : tentativi per slot (nelle modalità non concorrenti).
-- `--retry-with-email` : fallback che tenta con l'email fornita se le generazioni con no-email non producono nuovi codici.
-- `--concurrency N` : numero di thread concorrenti (con current concurrent implementation).
-- `--max-attempts N` : limite totale di tentativi across workers (0 = calcolato automaticamente).
-- `--delay` : delay tra richieste (per politeness / throttling).
-- `--output FILE` : file CSV di output (default `results.csv`). Contiene header `EMAIL,COUPON`.
-- `--log FILE` : file di log dettagliato.
-- `--domain DOMAIN` : dominio usato per indirizzi generati (default `example.com`).
+Dry‑run (nessuna richiesta reale, solo anteprima):
 
----
-
-## Modalità seed & email deterministiche
-- Per evitare riutilizzo accidentale di email, lo script genera (di default) un nuovo `seed` per ogni esecuzione e lo salva in `--seed-file`.
-- Le email determinate hanno formato: `<seedShort>-<index>@<domain>` (es. `ed0195cd-000005@example.com`).
-- Il file `email_index.txt` contiene l'indice successivo e viene aggiornato in modo atomico (o quasi — persist su ogni avanzamento).
-- `used_emails.txt` viene popolato con molteplici entry per ispezione e per calcolare l'indice di partenza se necessario.
-- Se desideri riusare uno seed precedente (ad esempio per riprendere una numerazione continuativa), puoi passare `--reuse-seed` e il file seed non verrà sovrascritto.
-
----
-
-## Modalità concorrente
-- Con `--concurrency N` lo script lancia N worker threads per inviare richieste in parallelo.
-- Ogni worker:
-  - ottiene la prossima email deterministica in modo thread-safe,
-  - invia il POST al webhook,
-  - estrae il coupon (da JSON o dal body/thanks page),
-  - registra la coppia (se codice nuovo).
-- Lo script raccoglie solo coupon unici (evita duplicati nella stessa esecuzione).
-- Usare `--max-attempts` per limitare il numero totale di richieste (utile per non sforare quote).
-
-Nota: sessioni requests vengono create per worker (thread-local). Per throughput molto elevato considerare una versione `asyncio + aiohttp` (posso fornire se serve).
-
----
-
-## Esempi d'uso
-1) Dry-run (verifica payload):
-```
-python3 coupon_gen.py --count 3 --no-email
+```bash
+python coupon_gen.py --count 3 --no-email
 ```
 
-2) Real, sequenziale, generazione 5 coupon usando email determinate (seed auto):
-```
-python3 coupon_gen.py --real --yes --count 5 --no-email --operator CoopVoce --output results.csv --log run.log
+Esecuzione reale, 5 coupon, email generate deterministicamente:
+
+```bash
+python coupon_gen.py \
+  --real --yes \
+  --count 5 \
+  --no-email \
+  --operator "CoopVoce" \
+  --output results.csv \
+  --log run.log
 ```
 
-3) Real, concorrente (veloce) generazione 200 coupon:
-```
-python3 coupon_gen.py --real --yes --count 200 --no-email --concurrency 12 --max-attempts 5000 --output results.csv --log run.log
-```
+Esecuzione reale concorrente, 200 coupon:
 
-4) Real, fallback: tenta `--no-email` e se non sufficiente usa la email fornita:
-```
-python3 coupon_gen.py --real --yes --count 10 --no-email --retry-with-email --email you@example.com --output results.csv --log run.log
+```bash
+python coupon_gen.py \
+  --real --yes \
+  --count 200 \
+  --no-email \
+  --operator "CoopVoce" \
+  --concurrency 12 \
+  --max-attempts 5000 \
+  --output results.csv \
+  --log run.log
 ```
 
 ---
 
-## Output CSV
-- Il CSV di output contiene esattamente le colonne:
+## Opzioni CLI (riassunto)
+
+```bash
+python coupon_gen.py [OPZIONI]
 ```
+
+### Modalità / sicurezza
+
+- `--real`  
+  Esegue richieste HTTP reali. Senza questo flag lo script lavora in **dry‑run**.
+
+- `--yes`  
+  Salta la conferma interattiva in modalità `--real`.
+
+### Target & concorrenza
+
+- `--count N`  
+  Numero di coupon unici da raccogliere (default `1`).
+
+- `--concurrency N`  
+  Numero di thread worker (default `6`).
+
+- `--max-retries N`  
+  Valore storico usato per derivare il default di `--max-attempts`.
+
+- `--max-attempts N`  
+  Limite massimo di richieste complessive.  
+  Se `0`, viene calcolato come:
+  `count * max_retries * concurrency * concurrency_max_attempts_multiplier`.
+
+- `--concurrency-max-attempts-multiplier N`  
+  Fattore moltiplicativo extra per il calcolo automatico di `max_attempts`.
+
+- `--delay SECONDS`  
+  Ritardo opzionale tra richieste (per worker) per ridurre il carico.
+
+### Email & seed
+
+- `--no-email`  
+  Utilizza email generate deterministicamente (seed+index) per ogni richiesta.
+
+- `--email EMAIL`  
+  Email fissa da usare quando **non** si usa `--no-email`.
+
+- `--domain DOMAIN`  
+  Dominio per le email generate (default `example.com`).
+
+- `--seed-file PATH`  
+  File in cui salvare/leggere il seed (default `email_seed.txt`).
+
+- `--index-file PATH`  
+  File per l’indice successivo di email (default `email_index.txt`).
+
+- `--used-file PATH`  
+  File append‑only con tutte le email usate (default `used_emails.txt`).
+
+- `--reuse-seed`  
+  Riutilizza un seed esistente invece di generarne uno nuovo.  
+  Utile per sessioni successive sullo stesso seed; usare con attenzione.
+
+### Operatore & output
+
+- `--operator NAME`  
+  Operatore MVNO da inviare al backend (es. `CoopVoce`, `1Mobile`, …).
+
+- `--output PATH`  
+  File CSV di output (default `results.csv`).
+
+- `--log PATH`  
+  File di log dettagliato (DEBUG, payload, risposte).
+
+---
+
+## CSV di output
+
+Formato sempre fisso:
+
+```text
 EMAIL,COUPON
-<email1>,<coupon1>
-<email2>,<coupon2>
+email1@example.com,S-ABCDE1
+email2@example.com,S-ABCDE2
 ...
 ```
-- Salva le coppie trovate nell'ordine di raccolta. Se vuoi colonne addizionali (attempts, status, operator, url) posso estendere il formato.
+
+L’ordine segue la raccolta effettiva dei codici.  
+Se in futuro serviranno colonne aggiuntive (operatore, timestamp, URL di redirect, ecc.) si può estendere la scrittura CSV senza rompere la UI.
 
 ---
 
-## Buone pratiche e limiti
-- Usa ritardi (`--delay`) e limiti di concorrenza responsabili per non sovraccaricare l'endpoint.
-- Rispetta termini d'uso del servizio: esegui test solo su ambienti autorizzati o con permesso esplicito (come hai confermato).
-- Lo script replica il flusso osservato lato client (POST a webhook e parsing JSON). Se il backend cambia formato o richiede cookie/CSRF/JS, potrebbe essere necessario un approccio browser-driven (Playwright/Selenium).
-- Le email generate non sono email "reali" (dominio `example.com` di default). Se intendi utilizzare mailbox reali per test end-to-end, sostituisci `--domain` con un dominio di test adeguato.
+## Seed & gestione email
+
+- Ad ogni esecuzione viene generato (salvo `--reuse-seed`) un seed a 64 bit, salvato in `email_seed.txt` e tracciato in `seeds_history.txt` con timestamp UTC.
+- Le email deterministiche sono del tipo:
+
+  ```text
+  <seedshort>-<index:06d>@<domain>
+  es: 9aa690cc-000305@example.com
+  ```
+
+- `email_index.txt` contiene il **prossimo indice libero**; è aggiornato a ogni email generata.
+- `used_emails.txt` accumula tutte le email effettivamente usate nel tempo, e viene usato anche per calcolare l’indice di partenza se serve ripristinare da history.
 
 ---
 
-## Debugging e troubleshooting
-- Abilita log dettagliato con `--log run.log`. I messaggi DEBUG mostrano payload JSON, response snippet e ragioni di eventuali fallback.
-- Controlla `used_emails.txt`, `email_index.txt` e `email_seed.txt` per tracciare la generazione di email e l'avanzamento dell'indice.
-- Se noti molti 4xx/5xx, rallenta (--delay) e verifica se l'endpoint ha meccanismi di protezione (rate-limiting, WAF).
+## Consigli operativi
+
+- Tieni `--concurrency` moderato e usa `--delay` se noti:
+  - aumenti di latenza improvvisi
+  - molti errori di rete / 5xx nel `run.log`.
+
+- Mantieni `--max-attempts` proporzionato al target; un valore troppo alto può generare molto traffico inutile se la promo è esaurita o limitata.
+
+- Usa sempre `--log` quando introduci modifiche al codice o noti comportamenti anomali: il file contiene snippet di risposta e messaggi DEBUG che non vedi in console.
+
+---
+
+## Debug rapido
+
+1. **Verifica dry‑run** (nessuna chiamata reale):
+
+   ```bash
+   python coupon_gen.py --count 3 --no-email
+   ```
+
+   Controlla che la UI e le email mostrate abbiano il formato atteso.
+
+2. **Test reale minimo**:
+
+   ```bash
+   python coupon_gen.py --real --yes --count 1 --no-email --operator "CoopVoce" --log run.log
+   ```
+
+   - verifica che:
+     - compaia una riga `🟢 [001] S-XXXXX ...`
+     - `results.csv` contenga `1` riga oltre l’header
+   - in `run.log` cerca:
+     - `status=200`
+     - JSON tipo `{"Coupon":"S-...","MNP":"CoopVoce","Page":"grazie"}`
+
+3. **Controllo deduplica**:
+
+   Prova con `--count 5` e guarda in `run.log` che eventuali duplicati vengano ignorati (`seen_codes`).
+
+---
+
+## Note legali / etiche
+
+- Lo script è pensato per **testing, QA, monitoraggio interno** e studi tecnici, non per uso fraudolento.
+- Prima di lanciarlo in produzione o su rete reale, assicurati di avere:
+  - autorizzazione scritta dell’ente titolare del sistema
+  - limiti chiari su volume, orari, indirizzi IP coinvolti.
+- In caso di cambiamenti al flusso (nuovi parametri anti‑bot, cookie, fingerprint JS) questo approccio HTTP “pulito” potrebbe non essere più sufficiente; in quel caso valuta soluzioni browser‑driven e sempre autorizzate.
 
 ---
