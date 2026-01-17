@@ -7,6 +7,13 @@ coupon_gen.py — concurrent coupon generator with hunter-style UI.
     - Header con info run
     - Una riga per ogni coupon trovato
     - Una sola barra di progresso in basso (aggiornata con \r)
+- CSV risultati nel formato (separatore ';' per apertura diretta in Excel IT):
+    USED;COUPON;MVNO;EMAIL
+  dove:
+    - USED = "0" di default (puoi metterlo a "1" a mano quando consumi il coupon)
+    - COUPON = codice S-XXXXX
+    - MVNO = valore passato con --operator
+    - EMAIL = email usata per ottenere il coupon
 - Log dettagliati solo su file se usi --log.
 """
 from __future__ import annotations
@@ -228,12 +235,8 @@ def print_header(count: int, operator: str, no_email: bool, concurrency: int):
 
 
 def print_status(collected: int, target: int, attempts: int, start_time: float):
-    """
-    Barra di progresso stile hunter.py:
-    🚀 24.90% |█████░░░░░░░░░░░░░░░░░░| 5/20 attempts:30 speed:6.5/s ETA:00:12:34
-    """
     elapsed = max(0.001, time.time() - start_time)
-    processed = max(1, collected)  # evita divisione per 0
+    processed = max(1, collected)
     percent = (processed / max(1, target)) * 100 if target > 0 else 0.0
     speed = processed / elapsed
     eta_seconds = (target - processed) / speed if speed > 0 and processed < target else 0.0
@@ -243,7 +246,6 @@ def print_status(collected: int, target: int, attempts: int, start_time: float):
     filled = int(bar_len * percent / 100)
     bar = "█" * filled + "░" * (bar_len - filled)
 
-    # Usiamo \r per sovrascrivere una sola riga
     status_line = (
         f"\r🚀 {percent:5.2f}% |{bar}| "
         f"{collected}/{target}  attempts:{attempts}  "
@@ -253,17 +255,9 @@ def print_status(collected: int, target: int, attempts: int, start_time: float):
 
 
 def log_coupon(index: int, code: str, email: str):
-    """
-    Stile log_find di hunter.py:
-    - Pulisce la riga della barra
-    - Stampa una riga con icona + dati
-    - La barra verrà ristampata subito dopo dal loop principale
-    """
-    # cancella la riga di status corrente
     print("\r" + " " * 140 + "\r", end="")
     icon = "🟢"
     print(f"{icon} [{index:03d}] {code:8s}  {email}")
-    # la barra verrà ristampata dal loop principale
 
 
 def do_dry_run(email: str, operator: str, count: int, no_email: bool, concurrency: int):
@@ -275,16 +269,139 @@ def do_dry_run(email: str, operator: str, count: int, no_email: bool, concurrenc
     print("Dry-run completato. Nessuna richiesta inviata.")
 
 
-def save_results_simple_csv(rows: List[Tuple[str, str]], outpath: str):
+# -----------------------------------------------------------------------------
+# CSV helpers (USED;COUPON;MVNO;EMAIL) + merge/dedup
+# -----------------------------------------------------------------------------
+def load_existing_results(outpath: str) -> List[Tuple[str, str, str, str]]:
+    """
+    Carica eventuale CSV esistente nel formato:
+      USED;COUPON;MVNO;EMAIL
+
+    Ritorna lista di tuple (used, coupon, mvno, email).
+    """
+    rows: List[Tuple[str, str, str, str]] = []
+    p = pathlib.Path(outpath)
+    if not p.exists():
+        return rows
+    try:
+        with open(outpath, "r", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f, delimiter=";")
+            header = next(reader, None)
+            for row in reader:
+                if len(row) >= 4:
+                    used = row[0].strip()
+                    coupon = row[1].strip()
+                    mvno = row[2].strip()
+                    email = row[3].strip()
+                    rows.append((used, coupon, mvno, email))
+    except Exception as e:
+        logger.error("Failed to read existing CSV %s: %s", outpath, e)
+    return rows
+
+
+def save_results_simple_csv(rows: List[Tuple[str, str]], outpath: str, operator: str):
+    """
+    Salva risultati unendo eventuali dati esistenti nel formato:
+      USED;COUPON;MVNO;EMAIL
+
+    Deduplica per coppia (coupon, email).
+    """
+    existing = load_existing_results(outpath)
+
+    seen = set()
+    merged: List[Tuple[str, str, str, str]] = []
+
+    for used, coupon, mvno, email in existing:
+        key = (coupon, email)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append((used, coupon, mvno, email))
+
+    for email, coupon in rows:
+        key = (coupon, email)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(("0", coupon, operator, email))
+
     try:
         with open(outpath, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["EMAIL", "COUPON"])
-            for email, coupon in rows:
-                writer.writerow([email, coupon])
-        logger.info("Saved output CSV (EMAIL,COUPON) to %s", outpath)
+            writer = csv.writer(f, delimiter=";")
+            writer.writerow(["USED", "COUPON", "MVNO", "EMAIL"])
+            for used, coupon, mvno, email in merged:
+                writer.writerow([used, coupon, mvno, email])
+        logger.info("Saved output CSV (USED;COUPON;MVNO;EMAIL) rows=%d to %s", len(merged), outpath)
     except Exception as e:
         logger.error("Failed to write CSV %s: %s", outpath, e)
+
+
+def find_last_index_for_seed_in_csv(csv_file: str, seed_short: str) -> int:
+    """
+    Guarda nel CSV esistente (USED;COUPON;MVNO;EMAIL) e trova
+    l'ultimo indice usato per il seed_short. Ritorna indice successivo.
+    """
+    p = pathlib.Path(csv_file)
+    if not p.exists():
+        return 0
+    max_idx = -1
+    try:
+        with open(csv_file, "r", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f, delimiter=";")
+            header = next(reader, None)
+            for row in reader:
+                if len(row) < 4:
+                    continue
+                email = row[3].strip()
+                local = email.split("@", 1)[0]
+                if local.startswith(seed_short + "-"):
+                    suffix = local[len(seed_short) + 1 :]
+                    try:
+                        v = int(suffix)
+                        if v > max_idx:
+                            max_idx = v
+                    except Exception:
+                        continue
+    except Exception as e:
+        logger.error("Error while scanning CSV %s for seed %s: %s", csv_file, seed_short, e)
+    return max_idx + 1 if max_idx >= 0 else 0
+
+
+def recover_seed_from_csv(csv_file: str) -> Optional[str]:
+    """
+    Fallback: se non esiste email_seed.txt ma esiste un CSV,
+    prova a recuperare un seed compatibile dal local-part delle email.
+
+    Assume formato email deterministico: <seedshort>-<index>@domain
+    Ritorna un seed_hex costruito a partire dal seedshort (seedshort + "00000000").
+    """
+    p = pathlib.Path(csv_file)
+    if not p.exists():
+        return None
+
+    try:
+        with open(csv_file, "r", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f, delimiter=";")
+            header = next(reader, None)
+            for row in reader:
+                if len(row) < 4:
+                    continue
+                email = row[3].strip()
+                local = email.split("@", 1)[0]
+                if "-" in local:
+                    seed_short = local.split("-", 1)[0]
+                    if len(seed_short) == 8:
+                        seed_hex = seed_short + "00000000"
+                        logger.info(
+                            "Recovered seed_hex %s from CSV %s (seed_short=%s)",
+                            seed_hex,
+                            csv_file,
+                            seed_short,
+                        )
+                        return seed_hex
+    except Exception as e:
+        logger.error("Error while recovering seed from CSV %s: %s", csv_file, e)
+    return None
 
 
 # -----------------------------------------------------------------------------
@@ -393,22 +510,36 @@ def generate_coupons_concurrent(
     print_header(count, operator, no_email, concurrency)
 
     # Seed handling
+    seed_hex: Optional[str] = None
     if reuse_seed:
         seed_hex = read_seed(seed_file)
         if not seed_hex:
-            print("❌ Errore: seed non trovato.")
+            print("❌ Errore: seed non trovato (--reuse-seed).")
             logger.error("Requested --reuse-seed but no seed file.")
             return []
+        logger.info("Reusing seed from %s: %s", seed_file, seed_hex)
     else:
-        seed_hex = generate_new_seed_hex()
-        persist_new_seed(seed_file, seed_hex)
+        seed_hex = read_seed(seed_file)
+        if seed_hex:
+            logger.info("Loaded existing seed from %s: %s", seed_file, seed_hex)
+        else:
+            recovered = recover_seed_from_csv(output_csv) if output_csv else None
+            if recovered:
+                seed_hex = recovered
+                persist_new_seed(seed_file, seed_hex)
+            else:
+                seed_hex = generate_new_seed_hex()
+                persist_new_seed(seed_file, seed_hex)
 
     seed_short = seed_hex[:8]
 
+    # determine starting index
     if pathlib.Path(index_file).exists():
         idx = read_index(index_file)
     else:
         idx = find_last_index_for_seed_in_used(used_file, seed_short)
+        if idx == 0 and output_csv:
+            idx = find_last_index_for_seed_in_csv(output_csv, seed_short)
         write_index(index_file, idx)
 
     gen = ConcurrentGenerator(seed_hex=seed_hex, index_file=index_file, used_file=used_file, domain=domain)
@@ -465,7 +596,7 @@ def generate_coupons_concurrent(
     results_rows = shared_state["results"][:count]
 
     if output_csv:
-        save_results_simple_csv(results_rows, output_csv)
+        save_results_simple_csv(results_rows, output_csv, operator)
 
     print("-" * 60)
     if results_rows:
@@ -489,7 +620,7 @@ def confirm(prompt: str) -> bool:
 
 
 def main(argv: Optional[list] = None):
-    p = argparse.ArgumentParser(description="coupon_gen.py — concurrent coupon generation (EMAIL,COUPON)")
+    p = argparse.ArgumentParser(description="coupon_gen.py — concurrent coupon generation (USED;COUPON;MVNO;EMAIL)")
     p.add_argument("--real", action="store_true", help="Perform real HTTP requests (default dry-run)")
     p.add_argument("--yes", action="store_true", help="Bypass interactive confirmation (use with --real)")
     p.add_argument("--no-email", action="store_true", help="Generate deterministic emails from seed/index for each attempt")
